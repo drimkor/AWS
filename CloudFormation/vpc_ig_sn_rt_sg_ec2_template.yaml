@@ -1,0 +1,143 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  AmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    Description: (Required) AMI Id used to launch the instances. This template uses AmazonLinux2 AMI using SSM parameter Store. To specify value, a parameter of 'aws:ec2:image' type must be created in AWS Systems Manager Parameter Store.
+  # EC2KeypairName:
+  #   Type: AWS::EC2::KeyPair::KeyName
+  #   Description: (Required) Provide the name of the EC2 Keypair
+
+Resources:
+  #####
+  # Network resources
+  #####
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: Test VPC
+
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    DependsOn: VPC
+  AttachGateway:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+      Tags:
+        - Key: Name
+          Value: Test InternetGateway
+
+  PublicSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select
+        - '0'
+        - Fn::GetAZs: !Ref 'AWS::Region'
+      Tags:
+        - Key: Name
+          Value: Test Public Subnet 1
+  
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    DependsOn:
+      - AttachGateway
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Test Public Route Table
+  
+  PublicRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn:
+      - VPC
+      - AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  
+  PublicSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  TestSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable SSH access
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Test SSH-Security-Group
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+  #####
+  # EC2 resources
+  #####
+  EC2InstanceProfileRoleForTest:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+  EC2InstanceprofileforTest:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2InstanceProfileRoleForTest
+
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    
+    Properties:
+      IamInstanceProfile: !Ref EC2InstanceprofileforTest
+      ImageId: !Ref AmiId
+      InstanceType: t2.micro
+      # KeyName: !Ref EC2KeypairName
+      SecurityGroupIds:
+        - !Ref TestSecurityGroup
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: Test EC2Instanse
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash -xe
+            yum -y update
+            yum update -y aws-cfn-bootstrap
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region}
+
+Outputs:
+  EC2InstancePublicDNSName:
+    Description: Public DNS name of the launched EC2 instance
+    Value: !GetAtt EC2Instance.PublicDnsName
+    Export:
+      Name: EC2InstancePublicDNSName
